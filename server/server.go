@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"flag"
-	"net"
 	"fmt"
+	"io"
+	"net"
+	"strings"
 )
 
 type Message struct {
@@ -13,51 +15,112 @@ type Message struct {
 }
 
 func handleError(err error) {
-	// TODO: all
-	// Deal with an error event.
+	if err != nil {
+		fmt.Println("Error:", err)
+	}
 }
 
 func acceptConns(ln net.Listener, conns chan net.Conn) {
-	// TODO: all
-	// Continuously accept a network connection from the Listener
-	// and add it to the channel for handling connections.
+	// Tell main if we stop accepting connections.
+	defer close(conns)
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			handleError(err)
+			return
+		}
+
+		// Pass the new connection to main.
+		conns <- conn
+	}
 }
 
 func handleClient(client net.Conn, clientid int, msgs chan Message) {
-	// TODO: all
-	// So long as this connection is alive:
-	// Read in new messages as delimited by '\n's
-	// Tidy up each message and add it to the messages channel,
-	// recording which client it came from.
+	defer client.Close()
+
+	reader := bufio.NewReader(client)
+
+	for {
+		msg, err := reader.ReadString('\n')
+		if err != nil {
+			// EOF means the client has disconnected normally.
+			if err != io.EOF {
+				handleError(err)
+			}
+
+			fmt.Println("Client disconnected:", clientid)
+			return
+		}
+
+		// Remove the line ending, keeping the message text.
+		msg = strings.TrimRight(msg, "\r\n")
+
+		msgs <- Message{
+			sender:  clientid,
+			message: msg,
+		}
+	}
 }
 
 func main() {
-	// Read in the network port we should listen on, from the commandline argument.
-	// Default to port 8030
 	portPtr := flag.String("port", ":8030", "port to listen on")
 	flag.Parse()
 
-	//TODO Create a Listener for TCP connections on the port given above.
+	ln, err := net.Listen("tcp", *portPtr)
+	if err != nil {
+		handleError(err)
+		return
+	}
+	defer ln.Close()
 
-	//Create a channel for connections
 	conns := make(chan net.Conn)
-	//Create a channel for messages
 	msgs := make(chan Message)
-	//Create a mapping of IDs to connections
 	clients := make(map[int]net.Conn)
 
-	//Start accepting connections
+	// Close remaining client connections when main finishes.
+	defer func() {
+		for _, conn := range clients {
+			conn.Close()
+		}
+	}()
+
 	go acceptConns(ln, conns)
+
+	nextID := 0
+	fmt.Println("Server listening on", *portPtr)
+
 	for {
 		select {
-		case conn := <-conns:
-			//TODO Deal with a new connection
-			// - assign a client ID
-			// - add the client to the clients map
-			// - start to asynchronously handle messages from this client
+		case conn, ok := <-conns:
+			if !ok {
+				return // The connection-accepting function stopped.
+			}
+
+			id := nextID
+			nextID++
+
+			clients[id] = conn
+			fmt.Println("Client connected:", id)
+
+			go handleClient(conn, id, msgs)
+
 		case msg := <-msgs:
-			//TODO Deal with a new message
-			// Send the message to all clients that aren't the sender
+			for id, conn := range clients {
+				// Do not send the message back to its sender.
+				if id == msg.sender {
+					continue
+				}
+
+				// Add one newline so the receiving client
+				// can identify the end of the message.
+				_, err := fmt.Fprintln(conn, msg.message)
+				if err != nil {
+					handleError(err)
+					conn.Close()
+					delete(clients, id)
+				}
+			}
 		}
 	}
 }
